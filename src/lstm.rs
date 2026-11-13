@@ -16,7 +16,8 @@
 //! that's how PyTorch goes"); this port transposes it once at load so the
 //! gate product can accumulate across the rows as independent sums, one lane
 //! each, which keeps every output's addition order and lets the loop run
-//! four lanes wide.
+//! four lanes wide, with the sums in registers from the first column to the
+//! last.
 //!
 //! The bias is a separate pass (`_ifgo += _b`), so it is added after the whole
 //! sum, not folded into the accumulator. Same for the head. Nothing here
@@ -37,8 +38,46 @@ use crate::buffer::Buf;
 use crate::engine::{self, Engine};
 use crate::error::{Error, Result};
 use crate::format::LstmConfig;
-use crate::kernels::macc_row_unfused;
+use crate::lanes::F4;
 use crate::weights::WeightReader;
+
+/// Registers of gate sums [`gate_sums`] carries through the columns
+/// together: thirty-two gates, with room left for a column of weights.
+const GATE_TILE: usize = 8;
+
+/// `R` registers of the gate product, four gates each, from register `at`:
+/// `gates = sum_j wt[.., j] * xh[j]` over the columns in order from zero,
+/// then the bias.
+///
+/// `wt` is column-major with `rows` gates a column, and `rows` is a multiple
+/// of four. The sums stay in registers across the columns, where
+/// accumulating in `gates` itself would send every step through memory and
+/// make each wait for the store before it. Each step is a multiply and then
+/// an add, two roundings: the reference computes this product unfused and
+/// its vectors are pinned that way.
+#[inline(always)]
+fn gate_sums<const R: usize>(
+    wt: &[f32],
+    rows: usize,
+    xh: &[f32],
+    bias: &[[f32; 4]],
+    gates: &mut [[f32; 4]],
+    at: usize,
+) {
+    let mut sum = [F4::zero(); R];
+    for (col, xj) in wt.chunks_exact(rows).zip(xh) {
+        // This column's weights for these gates, checked once here.
+        let (w, _) = col[4 * at..4 * (at + R)].as_chunks::<4>();
+        let x = F4::splat(*xj);
+        for (s, w) in sum.iter_mut().zip(w) {
+            *s = s.macc::<false>(F4::load(w), x);
+        }
+    }
+    let bias = &bias[at..at + R];
+    for ((g, s), b) in gates[at..at + R].iter_mut().zip(&sum).zip(bias) {
+        s.add(F4::load(b)).store(g);
+    }
+}
 
 /// One LSTM cell: the recurrent unit of `NAM/lstm.cpp`'s `LSTMCell`.
 #[derive(Debug, Clone)]
@@ -119,16 +158,21 @@ impl LstmCell {
 
         // Every gate's sum runs over the columns in order from zero, exactly
         // as a row-at-a-time dot product would; only which sums advance
-        // together differs, and those are independent.
+        // together differs, and those are independent. The bias is added to
+        // the finished sum, as `_ifgo += _b` does, not to a partial one.
         let rows = 4 * h;
-        self.ifgo.fill(0.0);
-        for (col, xj) in self.wt.chunks_exact(rows).take(cols).zip(self.xh.iter()) {
-            macc_row_unfused(&mut self.ifgo, col, *xj);
+        debug_assert_eq!(self.wt.len(), rows * cols);
+        let (gates, _) = self.ifgo.as_chunks_mut::<4>();
+        let (bias, _) = self.b.as_chunks::<4>();
+        let whole = gates.len() - gates.len() % GATE_TILE;
+        let mut at = 0;
+        while at < whole {
+            gate_sums::<GATE_TILE>(&self.wt, rows, &self.xh, bias, gates, at);
+            at += GATE_TILE;
         }
-        // Separate pass, exactly as `_ifgo += _b`: the bias lands on the
-        // finished sum rather than on a partial one.
-        for (v, bias) in self.ifgo.iter_mut().zip(self.b.iter()) {
-            *v += *bias;
+        while at < gates.len() {
+            gate_sums::<1>(&self.wt, rows, &self.xh, bias, gates, at);
+            at += 1;
         }
 
         let (i_off, f_off, g_off, o_off) = (0, h, 2 * h, 3 * h);

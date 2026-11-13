@@ -1,11 +1,11 @@
-# valverig-nam
+# valrig-nam
 
 Pure-Rust [Neural Amp Modeler](https://github.com/sdatkinson/neural-amp-modeler)
 inference. Loads `.nam` captures and runs them allocation-free in an audio
 callback.
 
 ```rust
-use valverig_nam::loader::Model;
+use valrig_nam::loader::Model;
 
 let mut model = Model::from_file("captures/plexi.nam")?;
 
@@ -72,6 +72,13 @@ it needs a reference checkout, which the one script in `tools/` makes:
 
 ```bash
 ./tools/regen-assets.sh
+```
+
+One test measures rather than checks, how fast each bundled capture runs
+against real time, so it is ignored by default:
+
+```bash
+cargo test --release --test benchmark -- --ignored --nocapture
 ```
 
 ## Licence

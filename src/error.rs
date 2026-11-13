@@ -1,4 +1,4 @@
-//! Error types for `valverig-nam`.
+//! Error types for `valrig-nam`.
 //!
 //! This is a library, so the error stays an enum a caller can match on rather
 //! than an opaque box. That distinction earns its keep: a host loading a

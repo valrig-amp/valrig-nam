@@ -21,7 +21,7 @@ EIGEN_REPO="${EIGEN_REPO:-https://gitlab.com/libeigen/eigen.git}"
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CRATE="$(dirname "$HERE")"
-WORK="${1:-${TMPDIR:-/tmp}/valverig-nam-reference}"
+WORK="${1:-${TMPDIR:-/tmp}/valrig-nam-reference}"
 ASSETS="$CRATE/assets"
 
 mkdir -p "$WORK"
@@ -52,7 +52,7 @@ build() { # build <name> <extra flags...>
 }
 
 # The canonical build: its output is what assets/vectors/*.out.f64 contains
-# and what valverig-nam is compared against.
+# and what valrig-nam is compared against.
 build canonical -O2 -ffp-contract=off -DEIGEN_DONT_VECTORIZE -DEIGEN_MAX_ALIGN_BYTES=0
 
 # Three other configurations the reference itself supports and ships. They are
@@ -96,7 +96,7 @@ done
 
 # Size-switchable models additionally get one vector per size. Two things have
 # to hold: the reference must implement the interface (asked, not hard-coded -
-# `--slim` fails otherwise), and valverig-nam must implement it too. Only
+# `--slim` fails otherwise), and valrig-nam must implement it too. Only
 # `SlimmableContainer` does. A slimmable *WaveNet* answers the reference's
 # probe but is run here at full width only, so generating its narrower widths
 # would record vectors nothing checks.
@@ -110,7 +110,7 @@ for m in "$ASSETS"/models/*.nam; do
   done
 done
 
-# Measure the reference's own build-to-build spread, case by case. valverig-nam is
+# Measure the reference's own build-to-build spread, case by case. valrig-nam is
 # held to this: where the reference agrees with itself we must match it exactly,
 # and where it does not we must land inside the envelope it spans.
 echo "measuring the reference's build-to-build spread..."

@@ -23,7 +23,7 @@ pub use crate::format::Metadata;
 /// here, so a host never needs the trait in scope.
 ///
 /// ```
-/// use valverig_nam::loader::Model;
+/// use valrig_nam::loader::Model;
 ///
 /// # let path = concat!(env!("CARGO_MANIFEST_DIR"), "/assets/models/wavenet.nam");
 /// let mut model = Model::from_file(path)?;
@@ -39,7 +39,7 @@ pub use crate::format::Metadata;
 /// let mut wet = [0.0f32; 64];
 /// model.process_mono(&dry, &mut wet);
 /// # assert!(wet.iter().all(|x| x.is_finite()));
-/// # Ok::<(), valverig_nam::error::Error>(())
+/// # Ok::<(), valrig_nam::error::Error>(())
 /// ```
 #[derive(Debug)]
 pub struct Model {

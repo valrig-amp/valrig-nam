@@ -17,6 +17,12 @@
 //! [`LayerConfig`] entry, so there is one description of a layer array, not a
 //! parsed one and a runtime one kept in step by hand; [`film_site`] indexes
 //! the FiLM array on both sides.
+//!
+//! [`Layer`] runs any layer the format can describe. The layers of an array
+//! that uses none of the options, which is every layer of an A1 or A2
+//! capture, are then handed to [`crate::fused`], which computes the same
+//! numbers in a quarter of the passes; [`WaveNet::new`] builds the model
+//! without that step, and [`WaveNet::fused`] takes it.
 
 use crate::activations::Activation;
 use crate::buffer::Buf;
@@ -28,6 +34,7 @@ use crate::format::{
     FilmConfig, GatingMode, LayerArrayConfig, LayerConfig, MAX_HISTORY_FLOATS, PostStackHeadConfig,
     WaveNetConfig, film_site,
 };
+use crate::fused::{FusedLayers, PlainLayer};
 use crate::gating::Nonlinearity;
 use crate::history::Arena;
 use crate::weights::WeightReader;
@@ -162,6 +169,48 @@ impl Layer {
         })
     }
 
+    /// The layer's parts if it is plain at `c` channels: one ungated
+    /// activation, a plain convolution and a plain 1x1 of that width with
+    /// their biases, a biasless mixin from one condition channel, and no
+    /// bottleneck, head 1x1 or FiLM. Anything else is `None`.
+    fn plain_parts(&self, c: usize) -> Option<PlainLayer> {
+        let Nonlinearity::Plain(activation) = &self.nonlinearity else {
+            return None;
+        };
+        let conv = &self.conv;
+        let mixin = &self.input_mixin;
+        let l1 = self.layer1x1.as_ref()?;
+        if self.head1x1.is_some()
+            || self.films.iter().any(Option::is_some)
+            || self.bottleneck != c
+            || conv.in_channels() != c
+            || conv.out_channels() != c
+            || !conv.is_plain()
+            || conv.bias().len() != c
+            || conv.kernel_size() == 0
+            || mixin.in_channels() != 1
+            || mixin.out_channels() != c
+            || !mixin.is_plain()
+            || !mixin.bias().is_empty()
+            || l1.in_channels() != c
+            || l1.out_channels() != c
+            || !l1.is_plain()
+            || l1.bias().len() != c
+        {
+            return None;
+        }
+        Some(PlainLayer {
+            kernel_size: conv.kernel_size(),
+            dilation: conv.dilation(),
+            conv_w: conv.tap_matrices(),
+            conv_b: conv.bias().to_vec(),
+            mixin_w: mixin.weight().to_vec(),
+            l1x1_w: l1.weight().to_vec(),
+            l1x1_b: l1.bias().to_vec(),
+            activation: activation.clone(),
+        })
+    }
+
     /// What the layer contributes to the skip path: the `head1x1` output when
     /// there is one, otherwise `z` itself, whose top `bottleneck` rows the
     /// caller accumulates. Handed on by reference; nothing is copied.
@@ -275,10 +324,109 @@ impl Layer {
 // LayerArray
 // ---------------------------------------------------------------------------
 
+/// The chain of layers in an array, in one of the two forms that run it.
+#[derive(Debug, Clone)]
+enum Layers {
+    /// Any layers the format can describe, each run on its own: what
+    /// [`LayerArray::new`] builds.
+    Each(Vec<Layer>),
+    /// Plain layers run together; see [`crate::fused`].
+    Fused(FusedLayers),
+}
+
+impl Layers {
+    /// The convolutions of layers that run on their own, in order; fused
+    /// layers have none to show.
+    fn convs(&self) -> impl Iterator<Item = &Conv1D> {
+        let each: &[Layer] = match self {
+            Layers::Each(layers) => layers,
+            Layers::Fused(_) => &[],
+        };
+        each.iter().map(|l| &l.conv)
+    }
+
+    fn set_max_buffer_size(&mut self, arena: &mut Arena, n: usize) {
+        match self {
+            Layers::Each(layers) => {
+                for l in layers {
+                    l.set_max_buffer_size(arena, n);
+                }
+            }
+            Layers::Fused(f) => f.set_max_buffer_size(n),
+        }
+    }
+
+    /// Run the chain over `n` frames of `input`, adding every layer's skip
+    /// output to `skips`.
+    fn process(
+        &mut self,
+        arena: &mut Arena,
+        input: &Buf,
+        condition: &Buf,
+        skips: &mut Buf,
+        n: usize,
+    ) {
+        match self {
+            Layers::Each(layers) => {
+                let mut input = input;
+                for layer in layers {
+                    layer.process(arena, input, condition, n);
+                    let layer: &Layer = layer;
+                    skips.add_top_from(layer.head_output(), n);
+                    input = &layer.output_next_layer;
+                }
+            }
+            Layers::Fused(f) => f.process(input, condition, skips, n),
+        }
+    }
+
+    /// The last layer's output.
+    fn output(&self) -> &Buf {
+        match self {
+            Layers::Each(layers) => {
+                &layers
+                    .last()
+                    .expect("layer array has at least one layer")
+                    .output_next_layer
+            }
+            Layers::Fused(f) => f.output(),
+        }
+    }
+
+    fn has_cached_prewarm_state(&self) -> bool {
+        match self {
+            Layers::Each(_) => self.convs().all(Conv1D::has_cached_prewarm_state),
+            Layers::Fused(f) => f.has_cached_prewarm_state(),
+        }
+    }
+
+    fn prewarm_from_cache(&mut self, arena: &mut Arena) {
+        match self {
+            Layers::Each(layers) => {
+                for l in layers {
+                    l.conv.prewarm_from_cache(arena);
+                }
+            }
+            Layers::Fused(f) => f.prewarm_from_cache(),
+        }
+    }
+
+    fn cache_prewarm_state(&mut self, arena: &Arena) {
+        match self {
+            Layers::Each(layers) => {
+                for l in layers {
+                    l.conv.cache_prewarm_state(arena);
+                }
+            }
+            Layers::Fused(f) => f.cache_prewarm_state(),
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 struct LayerArray {
     rechannel: Conv1x1,
-    layers: Vec<Layer>,
+    layers: Layers,
     head_inputs: Buf,
     head_rechannel: Conv1D,
     head_output_size: usize,
@@ -316,18 +464,35 @@ impl LayerArray {
         )?;
         Ok(Self {
             rechannel,
-            layers,
+            layers: Layers::Each(layers),
             head_inputs: Buf::new(),
             head_rechannel,
             head_output_size,
         })
     }
 
-    /// Every convolution in the array, in execution order.
+    /// Put the layers in their fused form if every one of them is plain;
+    /// otherwise leave the array as it is. `wants_output` says whether
+    /// another array follows and reads this one's last layer.
+    ///
+    /// For a model that has not been sized yet: the fused layers start with
+    /// no history, as the layers they replace do.
+    fn fuse(&mut self, wants_output: bool) {
+        let Layers::Each(layers) = &self.layers else {
+            return;
+        };
+        let c = self.rechannel.out_channels();
+        let parts: Option<Vec<PlainLayer>> = layers.iter().map(|l| l.plain_parts(c)).collect();
+        if let Some(fused) = parts.and_then(|p| FusedLayers::new(c, p, wants_output)) {
+            self.layers = Layers::Fused(fused);
+        }
+    }
+
+    /// Every convolution the array runs through `Conv1D`, in execution
+    /// order: the layers', unless they have been fused, and the head's.
     fn convs(&self) -> impl Iterator<Item = &Conv1D> {
         self.layers
-            .iter()
-            .map(|l| &l.conv)
+            .convs()
             .chain(std::iter::once(&self.head_rechannel))
     }
 
@@ -341,11 +506,9 @@ impl LayerArray {
 
     fn set_max_buffer_size(&mut self, arena: &mut Arena, n: usize) {
         self.rechannel.set_max_buffer_size(n);
-        for l in &mut self.layers {
-            l.set_max_buffer_size(arena, n);
-        }
-        // Sized after the layers so the head rechannel's history lands next to
-        // the layer histories it consumes, in execution order.
+        self.layers.set_max_buffer_size(arena, n);
+        // Sized after the layers, so that a head history in the arena lands
+        // next to the layer histories, in execution order.
         self.head_rechannel.set_max_buffer_size(arena, n);
         self.head_inputs.resize(self.head_output_size, n);
     }
@@ -372,43 +535,32 @@ impl LayerArray {
             None => self.head_inputs.zero_left(n),
         }
         self.rechannel.process(inputs, n);
-        for i in 0..self.layers.len() {
-            if i == 0 {
-                self.layers[0].process(arena, &self.rechannel.output, condition, n);
-            } else {
-                let (prev, cur) = self.layers.split_at_mut(i);
-                cur[0].process(arena, &prev[i - 1].output_next_layer, condition, n);
-            }
-            self.head_inputs
-                .add_top_from(self.layers[i].head_output(), n);
-        }
+        self.layers.process(
+            arena,
+            &self.rechannel.output,
+            condition,
+            &mut self.head_inputs,
+            n,
+        );
         self.head_rechannel.process(arena, &self.head_inputs, n);
     }
 
     /// The last layer's output, which the next array takes as its input.
     fn layer_outputs(&self) -> &Buf {
-        &self
-            .layers
-            .last()
-            .expect("layer array has at least one layer")
-            .output_next_layer
+        self.layers.output()
     }
 
     fn has_cached_prewarm_state(&self) -> bool {
-        self.convs().all(Conv1D::has_cached_prewarm_state)
+        self.layers.has_cached_prewarm_state() && self.head_rechannel.has_cached_prewarm_state()
     }
 
     fn prewarm_from_cache(&mut self, arena: &mut Arena) {
-        for l in &mut self.layers {
-            l.conv.prewarm_from_cache(arena);
-        }
+        self.layers.prewarm_from_cache(arena);
         self.head_rechannel.prewarm_from_cache(arena);
     }
 
     fn cache_state_as_prewarmed(&mut self, arena: &Arena) {
-        for l in &mut self.layers {
-            l.conv.cache_prewarm_state(arena);
-        }
+        self.layers.cache_prewarm_state(arena);
         self.head_rechannel.cache_prewarm_state(arena);
     }
 }
@@ -728,6 +880,37 @@ impl WaveNet {
         })
     }
 
+    /// The same model with every plain layer array on the fused path; see
+    /// [`crate::fused`]. An array that is not plain, or is wider than that
+    /// path takes, is left as it is, and so is every array of a model whose
+    /// condition is more than one channel.
+    ///
+    /// For a model fresh from [`WaveNet::new`], before anything has sized
+    /// it. The output is the same to the bit either way.
+    pub(crate) fn fused(mut self) -> Self {
+        // The condition is the input itself unless a nested model makes it.
+        let condition_channels = match &self.condition_dsp {
+            Some(dsp) => dsp.out_channels(),
+            None => self.in_channels,
+        };
+        if condition_channels == 1 {
+            let count = self.layer_arrays.len();
+            for (i, a) in self.layer_arrays.iter_mut().enumerate() {
+                a.fuse(i + 1 < count);
+            }
+        }
+        self
+    }
+
+    /// How many of the layer arrays run fused.
+    #[cfg(test)]
+    pub(crate) fn fused_arrays(&self) -> usize {
+        self.layer_arrays
+            .iter()
+            .filter(|a| matches!(a.layers, Layers::Fused(_)))
+            .count()
+    }
+
     /// Whether a steady state has been cached, letting a later reset skip the
     /// prewarm run entirely.
     fn has_cached_prewarm_state(&self) -> bool {
@@ -856,7 +1039,8 @@ impl WaveNet {
     /// plain, ungated, un-FiLMed layers with a leaky ReLU, a residual 1x1
     /// with bias and no head 1x1, a bottleneck equal to the channels, one
     /// input, one output, no condition model and no post-stack head.
-    /// Anything else is `None`.
+    /// Anything else is `None`, and so is a model that has been
+    /// [`WaveNet::fused`], whose layers are no longer there to read.
     pub(crate) fn a2_parts(&self) -> Option<A2Parts> {
         if self.layer_arrays.len() != 1
             || self.post_stack_head.is_some()
@@ -884,50 +1068,31 @@ impl WaveNet {
         {
             return None;
         }
-        let mut layers = Vec::with_capacity(a.layers.len());
-        for l in &a.layers {
-            let slope = match &l.nonlinearity {
-                Nonlinearity::Plain(Activation::LeakyReLU { negative_slope }) => *negative_slope,
-                _ => return None,
-            };
-            let conv = &l.conv;
-            let mixin = &l.input_mixin;
-            let Some(l1) = &l.layer1x1 else { return None };
-            if l.head1x1.is_some()
-                || l.films.iter().any(Option::is_some)
-                || l.bottleneck != c
-                || conv.in_channels() != c
-                || conv.out_channels() != c
-                || !conv.is_plain()
-                || conv.bias().len() != c
-                || conv.kernel_size() == 0
-                || mixin.in_channels() != 1
-                || mixin.out_channels() != c
-                || !mixin.is_plain()
-                || !mixin.bias().is_empty()
-                || l1.in_channels() != c
-                || l1.out_channels() != c
-                || !l1.is_plain()
-                || l1.bias().len() != c
-            {
+        let Layers::Each(each) = &a.layers else {
+            return None;
+        };
+        let mut layers = Vec::with_capacity(each.len());
+        for l in each {
+            let p = l.plain_parts(c)?;
+            let Activation::LeakyReLU { negative_slope } = p.activation else {
                 return None;
-            }
+            };
             layers.push(A2LayerParts {
-                kernel_size: conv.kernel_size(),
-                dilation: conv.dilation(),
-                conv_w: conv.weight_taps().to_vec(),
-                conv_b: conv.bias().to_vec(),
-                mixin_w: mixin.weight().to_vec(),
-                l1x1_w: l1.weight().to_vec(),
-                l1x1_b: l1.bias().to_vec(),
-                slope,
+                kernel_size: p.kernel_size,
+                dilation: p.dilation,
+                conv_w: p.conv_w,
+                conv_b: p.conv_b,
+                mixin_w: p.mixin_w,
+                l1x1_w: p.l1x1_w,
+                l1x1_b: p.l1x1_b,
+                slope: negative_slope,
             });
         }
         Some(A2Parts {
             channels: c,
             rechannel: a.rechannel.weight().to_vec(),
             layers,
-            head_w: head.weight_taps().to_vec(),
+            head_w: head.tap_matrices(),
             head_b: head.bias()[0],
             head_scale: self.head_scale,
             prewarm_samples: self.prewarm_samples,

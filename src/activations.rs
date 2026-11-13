@@ -14,15 +14,15 @@
 //!
 //! `Tanh`, the activation NAM's standard architecture applies to every
 //! channel of every layer, is this crate's own: [`tanh`], plain
-//! single-precision arithmetic evaluated identically on every machine,
-//! sixteen lanes at a time. At every float there is, it is within two and
+//! single-precision arithmetic evaluated identically on every machine, a
+//! block of values at a time. At every float there is, it is within two and
 //! a half units in the last place of the true `tanh` — so never more than
 //! two floats from the correctly rounded one, and the correctly rounded
 //! float itself on 92% of them, as `tests/activations.rs` measures — and
 //! the recorded bounds hold the whole-model consequence to the reference.
 //!
 //! ```
-//! use valverig_nam::activations::{Activation, tanh};
+//! use valrig_nam::activations::{Activation, tanh};
 //!
 //! let mut block = [0.5f32, -2.0, 0.0];
 //! Activation::Tanh.apply(&mut block);
@@ -117,6 +117,14 @@ pub fn fast_tanh(x: f32) -> f32 {
 /// model's time.
 #[inline(always)]
 pub fn tanh(x: f32) -> f32 {
+    let (n, r) = tanh_reduce(x);
+    tanh_finish(x, n, tanh_expm1(r))
+}
+
+/// The first third of [`tanh`]: `2|x|` split into `n` whole powers of two
+/// and a remainder `r`, so that `e^{2|x|} = 2^n · e^r`.
+#[inline(always)]
+fn tanh_reduce(x: f32) -> (f32, f32) {
     const LOG2E: f32 = std::f32::consts::LOG2_E;
     const LN2_HI: f32 = 0.693_359_4;
     const LN2_LO: f32 = -2.121_944_4e-4;
@@ -127,24 +135,64 @@ pub fn tanh(x: f32) -> f32 {
     let n = (t * LOG2E + ROUNDER) - ROUNDER;
     let r = t - n * LN2_HI;
     let r = r - n * LN2_LO;
+    (n, r)
+}
+
+/// The middle third of [`tanh`]: `e^r - 1` for the remainder.
+#[inline(always)]
+fn tanh_expm1(r: f32) -> f32 {
     let mut p = 1.987_569_2e-4;
     p = p * r + 1.398_199_9e-3;
     p = p * r + 8.333_452e-3;
     p = p * r + 4.166_579_6e-2;
     p = p * r + 1.666_666_5e-1;
     p = p * r + 0.5;
-    let q = p * (r * r) + r;
+    p * (r * r) + r
+}
+
+/// The last third of [`tanh`]: the power of two put back, the quotient, and
+/// the sign of `x`.
+#[inline(always)]
+fn tanh_finish(x: f32, n: f32, q: f32) -> f32 {
     let scale = f32::from_bits(((n as i32 + 127) << 23) as u32);
     let e = q * scale + (scale - 1.0);
     (e / (e + 2.0)).copysign(x)
 }
 
-/// [`tanh`] over a slice, sixteen at a time: four vectors' worth, so the
-/// compiler interleaves four independent chains and the divide's latency
-/// hides behind the rest. On an Apple M3, four at a time measures 0.89 ns
-/// an element, sixteen 0.79, libm 2.0.
+/// Elements [`tanh_lanes`] takes through one third of [`tanh`] before
+/// starting them on the next.
+const STAGE: usize = 32;
+
+/// [`tanh`] over a slice.
+///
+/// One element's `tanh` is some thirty operations, each waiting on the one
+/// before, and a core only looks so far ahead for work it can start: run
+/// element after element, it holds a handful of those chains at once and
+/// its multipliers sit idle between their links. So a block of [`STAGE`]
+/// elements goes through the reduction, then the polynomial, then the rest,
+/// and within a stage no chain is long. The operations and their order are
+/// [`tanh`]'s own, element by element, so the result is the same to the
+/// bit. On an Apple M3 this measures 0.70 ns an element, against 0.82 for
+/// the whole function sixteen elements at a time and 2.0 for libm.
+///
+/// What is left over goes sixteen at a time, then singly.
 pub(crate) fn tanh_lanes(data: &mut [f32]) {
-    let (chunks, rest) = data.as_chunks_mut::<16>();
+    let (blocks, rest) = data.as_chunks_mut::<STAGE>();
+    for b in blocks {
+        let mut n = [0.0f32; STAGE];
+        let mut r = [0.0f32; STAGE];
+        for i in 0..STAGE {
+            (n[i], r[i]) = tanh_reduce(b[i]);
+        }
+        let mut q = [0.0f32; STAGE];
+        for i in 0..STAGE {
+            q[i] = tanh_expm1(r[i]);
+        }
+        for i in 0..STAGE {
+            b[i] = tanh_finish(b[i], n[i], q[i]);
+        }
+    }
+    let (chunks, rest) = rest.as_chunks_mut::<16>();
     for c in chunks {
         let mut r = [0.0f32; 16];
         for i in 0..16 {

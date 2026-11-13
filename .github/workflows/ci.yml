@@ -1,3 +1,5 @@
+# Every pull request runs the gates. A merge to main runs them again and
+# releases, so a version on crates.io is one that passed review and CI.
 name: CI
 
 on:
@@ -33,12 +35,55 @@ jobs:
       - name: Build
         run: cargo build --release
 
+  # A merge to main is a release: the crate goes to crates.io, the commit
+  # gets the version's tag, and GitHub gets a release that points at the
+  # crate. Each step looks first, so a merge that changes no version, or a
+  # run started again, does nothing twice.
   publish:
     needs: gates
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
+      - name: What is being released
+        id: crate
+        run: |
+          name=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[0].name')
+          version=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[0].version')
+          echo "name=$name" >> "$GITHUB_OUTPUT"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          # Asked of the registry itself: from inside the crate, `cargo info`
+          # answers for the checkout.
+          if curl -fsS -o /dev/null -A "$name release (github actions)" "https://crates.io/api/v1/crates/$name/$version"; then
+            echo "publish=false" >> "$GITHUB_OUTPUT"
+            echo "$name $version is already on crates.io."
+          else
+            echo "publish=true" >> "$GITHUB_OUTPUT"
+          fi
       - name: Publish on crates.io
+        if: steps.crate.outputs.publish == 'true'
         run: cargo publish --token ${{ secrets.CARGO_REGISTRY_TOKEN }}
+      - name: Tag the commit and release it on GitHub
+        env:
+          GH_TOKEN: ${{ github.token }}
+          NAME: ${{ steps.crate.outputs.name }}
+          VERSION: ${{ steps.crate.outputs.version }}
+        run: |
+          tag="v$VERSION"
+          if gh release view "$tag" > /dev/null 2>&1; then
+            echo "$tag is already released."
+            exit 0
+          fi
+          {
+            echo "\`$NAME\` $VERSION, on crates.io: https://crates.io/crates/$NAME/$VERSION"
+            echo
+            echo '```toml'
+            echo "$NAME = \"$VERSION\""
+            echo '```'
+            echo
+            echo "Documentation: https://docs.rs/$NAME/$VERSION"
+          } > notes.md
+          gh release create "$tag" --target "$GITHUB_SHA" --title "$NAME $VERSION" --notes-file notes.md

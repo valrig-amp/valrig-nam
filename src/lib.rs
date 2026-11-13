@@ -70,9 +70,11 @@ mod a2_fast;
 mod container;
 mod conv;
 mod film;
+mod fused;
 mod gating;
 mod history;
 mod kernels;
+mod lanes;
 mod lstm;
 #[cfg(test)]
 mod testutil;

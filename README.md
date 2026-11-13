@@ -74,6 +74,13 @@ it needs a reference checkout, which the one script in `tools/` makes:
 ./tools/regen-assets.sh
 ```
 
+One test measures rather than checks, how fast each bundled capture runs
+against real time, so it is ignored by default:
+
+```bash
+cargo test --release --test benchmark -- --ignored --nocapture
+```
+
 ## Licence
 
 MIT; see [`LICENSE`](LICENSE). The `.nam` files under `assets/models/` are

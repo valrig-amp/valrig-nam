@@ -1,4 +1,4 @@
-// Reference-vector generator for valverig-nam: runs a .nam model through the C++
+// Reference-vector generator for valrig-nam: runs a .nam model through the C++
 // reference over a deterministic signal and a block schedule, and writes the
 // input, the output and a JSON sidecar. Raw little-endian f64 blobs, so the
 // Rust test suite can compare bit for bit.

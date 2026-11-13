@@ -1,11 +1,11 @@
-# valverig-nam
+# valrig-nam
 
 Pure-Rust [Neural Amp Modeler](https://github.com/sdatkinson/neural-amp-modeler)
 inference. Loads `.nam` captures and runs them allocation-free in an audio
 callback.
 
 ```rust
-use valverig_nam::loader::Model;
+use valrig_nam::loader::Model;
 
 let mut model = Model::from_file("captures/plexi.nam")?;
 

@@ -9,7 +9,7 @@
 //! # Running a capture
 //!
 //! ```
-//! use valverig_nam::loader::Model;
+//! use valrig_nam::loader::Model;
 //!
 //! # let path = concat!(env!("CARGO_MANIFEST_DIR"), "/assets/models/wavenet.nam");
 //! let mut model = Model::from_file(path)?;
@@ -22,7 +22,7 @@
 //! let mut wet = [0.0f32; 64];
 //! model.process_mono(&dry, &mut wet); // allocation-free from here on
 //! # assert!(wet.iter().all(|x| x.is_finite()));
-//! # Ok::<(), valverig_nam::error::Error>(())
+//! # Ok::<(), valrig_nam::error::Error>(())
 //! ```
 //!
 //! A capture is only correct at the sample rate it was trained at; nothing

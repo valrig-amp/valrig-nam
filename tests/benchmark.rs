@@ -16,7 +16,7 @@ use std::path::PathBuf;
 use std::time::Instant;
 
 use common::lcg_signal;
-use valverig_nam::loader::Model;
+use valrig_nam::loader::Model;
 
 /// Steady-state throughput of each bundled capture at blocks of 64 and 512
 /// frames: nanoseconds a frame, and multiples of real time at 48 kHz. The

@@ -14,7 +14,7 @@
 //! `i` in `-4000..=4000`.
 
 use std::path::Path;
-use valverig_nam::activations::*;
+use valrig_nam::activations::*;
 
 const FUNCTIONS: usize = 8;
 const FIRST: i32 = -4000;

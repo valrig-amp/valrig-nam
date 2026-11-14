@@ -22,7 +22,7 @@
 //! the recorded bounds hold the whole-model consequence to the reference.
 //!
 //! ```
-//! use valrig_nam::activations::{Activation, tanh};
+//! use valverig_nam::activations::{Activation, tanh};
 //!
 //! let mut block = [0.5f32, -2.0, 0.0];
 //! Activation::Tanh.apply(&mut block);

@@ -13,7 +13,7 @@
 //! path.
 //!
 //! ```
-//! use valrig_nam::format::{self, ArchConfig};
+//! use valverig_nam::format::{self, ArchConfig};
 //!
 //! # let path = concat!(env!("CARGO_MANIFEST_DIR"), "/assets/models/wavenet.nam");
 //! let file = format::load_file(path)?;
@@ -21,7 +21,7 @@
 //! assert_eq!(file.sample_rate, Some(48_000.0));
 //! let ArchConfig::WaveNet(cfg) = &file.config else { panic!("not a WaveNet") };
 //! assert_eq!(cfg.layer_arrays.len(), 2);
-//! # Ok::<(), valrig_nam::error::Error>(())
+//! # Ok::<(), valverig_nam::error::Error>(())
 //! ```
 //!
 //! # Divergences from the reference
@@ -82,7 +82,7 @@ pub const MAX_HISTORY_FLOATS: usize = 1 << 25;
 
 /// Lowest `sample_rate` a file may state, in Hz.
 ///
-/// The same bound the rest of Valrig works to, so that a capture this
+/// The same bound the rest of ValveRig works to, so that a capture this
 /// crate accepts is one the DSP stages beside it will also run at: a rate
 /// they refuse would otherwise parse here and fail later, when a rack is
 /// prepared rather than when the file is read.

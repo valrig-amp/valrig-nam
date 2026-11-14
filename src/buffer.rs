@@ -21,7 +21,7 @@
 /// first.
 ///
 /// ```
-/// use valrig_nam::buffer::Buf;
+/// use valverig_nam::buffer::Buf;
 ///
 /// let mut b = Buf::zeros(2, 4);      // stereo, up to 4 frames
 /// b.set(1, 0, 0.5);                  // channel 1, frame 0

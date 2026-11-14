@@ -12,7 +12,7 @@ use common::{lcg_signal, run_schedule};
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::Cell;
 use std::path::PathBuf;
-use valrig_nam::loader::Model;
+use valverig_nam::loader::Model;
 
 // Per-thread, because the test harness runs tests concurrently and a global
 // counter would attribute one test's setup allocations to another's measured

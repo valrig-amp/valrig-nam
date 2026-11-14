@@ -3,7 +3,7 @@
 #![allow(dead_code)]
 
 use std::path::Path;
-use valrig_nam::loader::Model;
+use valverig_nam::loader::Model;
 
 /// A little-endian `f64` blob, as `tools/gen_vectors.cpp` writes them.
 pub fn read_f64(path: &Path) -> Vec<f64> {
